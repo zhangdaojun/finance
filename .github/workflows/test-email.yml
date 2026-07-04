@@ -1,0 +1,54 @@
+name: Test QQ mail delivery
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - .github/workflows/test-email.yml
+  workflow_dispatch:
+
+jobs:
+  test-email:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Send test email
+        env:
+          SMTP_HOST: smtp.qq.com
+          SMTP_PORT: "465"
+          SMTP_USERNAME: 11283176@qq.com
+          SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
+          EMAIL_FROM: 11283176@qq.com
+          EMAIL_TO: 11283176@qq.com
+        run: |
+          python - <<'PY'
+          import os
+          import smtplib
+          from datetime import datetime
+          from email.message import EmailMessage
+          from zoneinfo import ZoneInfo
+
+          required = ["SMTP_HOST", "SMTP_PORT", "SMTP_USERNAME", "SMTP_PASSWORD", "EMAIL_FROM", "EMAIL_TO"]
+          missing = [name for name in required if not os.environ.get(name)]
+          if missing:
+              raise SystemExit(f"Missing env vars: {', '.join(missing)}")
+
+          now = datetime.now(ZoneInfo("Asia/Shanghai")).strftime("%Y-%m-%d %H:%M:%S")
+          msg = EmailMessage()
+          msg["Subject"] = f"测试邮件｜AI选股简报｜{now}"
+          msg["From"] = os.environ["EMAIL_FROM"]
+          msg["To"] = os.environ["EMAIL_TO"]
+          msg.set_content(
+              f"这是一封 GitHub Actions 测试邮件。\n\n"
+              f"发送账号：{os.environ['EMAIL_FROM']}\n"
+              f"接收账号：{os.environ['EMAIL_TO']}\n"
+              f"北京时间：{now}\n\n"
+              "如果收到这封邮件，说明 QQ 邮箱 SMTP 授权码和发送链路配置正常。\n"
+          )
+
+          with smtplib.SMTP_SSL(os.environ["SMTP_HOST"], int(os.environ["SMTP_PORT"]), timeout=30) as smtp:
+              smtp.login(os.environ["SMTP_USERNAME"], os.environ["SMTP_PASSWORD"])
+              smtp.send_message(msg)
+          print("Test email sent")
+          PY
