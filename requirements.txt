@@ -1,0 +1,4 @@
+google-api-python-client==2.176.0
+google-auth==2.40.3
+requests==2.32.4
+yfinance==0.2.65
