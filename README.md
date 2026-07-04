@@ -1,6 +1,6 @@
 # 中文市场与AI选股简报 GitHub Actions 部署
 
-这个项目会在 GitHub Actions 中按工作日 A 股交易时段自动生成中文市场与AI选股简报，保存到 Google Docs，并通过 `11283176@qq.com` 发送到 `11283176@qq.com`。
+这个项目会在 GitHub Actions 中按工作日 A 股交易时段自动生成中文市场与AI选股简报，保存到 Google Docs，并通过 `zhangdaojun@gmail.com` 发送到 `11283176@qq.com`。
 
 文档规则：北京时间一天一个文档，标题为 `中文市场与AI选股简报｜YYYY-MM-DD`。同一天内多次运行会追加到当天文档末尾，不会重复创建多个文档。
 
@@ -18,13 +18,13 @@
 - `OPENAI_API_KEY`：OpenAI API key。
 - `GOOGLE_SERVICE_ACCOUNT_JSON`：Google Cloud 服务账号 JSON。可以直接粘贴完整 JSON，也可以粘贴 base64 后的 JSON。
 - `GOOGLE_DRIVE_FOLDER_ID`：可选。目标 Google Drive 文件夹 ID。建议填写。
-- `SMTP_PASSWORD`：`11283176@qq.com` 的 QQ 邮箱 SMTP 授权码，不是 QQ 登录密码。
+- `SMTP_PASSWORD`：`zhangdaojun@gmail.com` 的 Gmail 应用专用密码，不是 Gmail 登录密码。
 
 可选变量：
 
 - `OPENAI_MODEL`：默认 `gpt-4.1`。在 `Settings -> Secrets and variables -> Actions -> Variables` 中配置。
 
-邮件发送参数已在工作流中固定为 `SMTP_HOST=smtp.qq.com`、`SMTP_PORT=465`、`SMTP_USERNAME=11283176@qq.com`、`EMAIL_FROM=11283176@qq.com`。
+邮件发送参数已在工作流中固定为 `SMTP_HOST=smtp.gmail.com`、`SMTP_PORT=465`、`SMTP_USERNAME=zhangdaojun@gmail.com`、`EMAIL_FROM=zhangdaojun@gmail.com`。
 
 ## Google Docs 配置
 
@@ -47,11 +47,11 @@ OPENAI_MODEL=gpt-4.1
 GOOGLE_SERVICE_ACCOUNT_JSON={"type":"service_account",...}
 GOOGLE_DRIVE_FOLDER_ID=你的文件夹ID
 EMAIL_TO=11283176@qq.com
-EMAIL_FROM=11283176@qq.com
-SMTP_HOST=smtp.qq.com
+EMAIL_FROM=zhangdaojun@gmail.com
+SMTP_HOST=smtp.gmail.com
 SMTP_PORT=465
-SMTP_USERNAME=11283176@qq.com
-SMTP_PASSWORD=你的QQ邮箱SMTP授权码
+SMTP_USERNAME=zhangdaojun@gmail.com
+SMTP_PASSWORD=你的Gmail应用专用密码
 ```
 
 然后运行：
