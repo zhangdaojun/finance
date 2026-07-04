@@ -1,5 +1,5 @@
 name: Test Gmail mail delivery
-# trigger: 2026-07-04T10:20:00+08:00
+# trigger: 2026-07-04T10:26:00+08:00
 
 on:
   push:
