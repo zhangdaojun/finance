@@ -39,9 +39,9 @@ jobs:
           GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
           GOOGLE_DRIVE_FOLDER_ID: ${{ secrets.GOOGLE_DRIVE_FOLDER_ID }}
           EMAIL_TO: 11283176@qq.com
-          EMAIL_FROM: ${{ secrets.EMAIL_FROM }}
-          SMTP_HOST: ${{ secrets.SMTP_HOST }}
-          SMTP_PORT: ${{ secrets.SMTP_PORT }}
-          SMTP_USERNAME: ${{ secrets.SMTP_USERNAME }}
+          EMAIL_FROM: zhangdaojun@gmail.com
+          SMTP_HOST: smtp.gmail.com
+          SMTP_PORT: "465"
+          SMTP_USERNAME: zhangdaojun@gmail.com
           SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
         run: python scripts/premarket_report.py
