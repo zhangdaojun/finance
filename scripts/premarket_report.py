@@ -6,22 +6,25 @@ from __future__ import annotations
 import base64
 import json
 import os
+import smtplib
 import sys
 import textwrap
 import urllib.parse
 from dataclasses import dataclass
 from datetime import datetime, timedelta
+from email.message import EmailMessage
 from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
 
 import requests
 
+
 ROOT = Path(__file__).resolve().parents[1]
 REPORT_DIR = ROOT / "reports"
 LOCAL_ENV = ROOT / ".env.local"
 TZ = ZoneInfo("Asia/Shanghai")
-UA = "Mozilla/5.0 (compatible; finance-market-brief/1.0)"
+UA = "Mozilla/5.0 (compatible; premarket-report/1.0)"
 
 
 @dataclass
@@ -32,6 +35,7 @@ class MarketItem:
 
 
 def load_local_env() -> None:
+    """Load .env.local for manual runs. GitHub Actions uses real env vars."""
     if not LOCAL_ENV.exists():
         return
     for raw_line in LOCAL_ENV.read_text(encoding="utf-8", errors="replace").splitlines():
@@ -39,8 +43,10 @@ def load_local_env() -> None:
         if not line or line.startswith("#") or "=" not in line:
             continue
         key, value = line.split("=", 1)
-        if key.strip() and key.strip() not in os.environ:
-            os.environ[key.strip()] = value.strip().strip('"').strip("'")
+        key = key.strip()
+        value = value.strip().strip('"').strip("'")
+        if key and key not in os.environ:
+            os.environ[key] = value
 
 
 def require_env(name: str) -> str:
@@ -50,11 +56,8 @@ def require_env(name: str) -> str:
     return value
 
 
-def is_allowed_run_time(now: datetime) -> bool:
-    if now.weekday() >= 5:
-        return False
-    minutes = now.hour * 60 + now.minute
-    return (9 * 60 + 20 <= minutes <= 11 * 60 + 30) or (13 * 60 <= minutes <= 15 * 60)
+def optional_env(name: str, default: str = "") -> str:
+    return os.environ.get(name, default).strip()
 
 
 def fetch_json(url: str, timeout: int = 15) -> dict[str, Any]:
@@ -73,7 +76,18 @@ def as_float(value: Any, default: float = 0.0) -> float:
 
 
 def eastmoney_clist(fs: str, fields: str, fid: str, pz: int = 80, po: int = 1) -> list[dict[str, Any]]:
-    params = {"pn": 1, "pz": pz, "po": po, "np": 1, "ut": "bd1d9ddb04089700cf9c27f6f7426281", "fltt": 2, "invt": 2, "fid": fid, "fs": fs, "fields": fields}
+    params = {
+        "pn": 1,
+        "pz": pz,
+        "po": po,
+        "np": 1,
+        "ut": "bd1d9ddb04089700cf9c27f6f7426281",
+        "fltt": 2,
+        "invt": 2,
+        "fid": fid,
+        "fs": fs,
+        "fields": fields,
+    }
     url = "https://push2.eastmoney.com/api/qt/clist/get?" + urllib.parse.urlencode(params)
     data = fetch_json(url, timeout=12)
     return data.get("data", {}).get("diff") or []
@@ -93,8 +107,41 @@ def fetch_hot_boards() -> dict[str, list[dict[str, Any]]]:
     return result
 
 
+def fetch_hot_stocks() -> list[dict[str, Any]]:
+    fields = "f12,f14,f2,f3,f5,f6,f8,f10,f20,f62,f184"
+    fs = "m:0+t:6,m:0+t:80,m:1+t:2,m:1+t:23"
+    rows: dict[str, dict[str, Any]] = {}
+    for fid, pz in (("f62", 160), ("f3", 160), ("f6", 120)):
+        try:
+            for row in eastmoney_clist(fs, fields, fid, pz=pz):
+                code = str(row.get("f12") or "")
+                name = str(row.get("f14") or "")
+                pct = as_float(row.get("f3"))
+                amount = as_float(row.get("f6"))
+                net_inflow = as_float(row.get("f62"))
+                if not code or not name or "ST" in name.upper():
+                    continue
+                if amount < 120_000_000 or net_inflow <= 0 or pct < 0.5:
+                    continue
+                score = (
+                    pct * 1.8
+                    + min(amount / 100_000_000, 120) * 0.08
+                    + max(net_inflow / 100_000_000, 0) * 1.6
+                    + max(as_float(row.get("f184")), 0) * 0.5
+                )
+                row["score"] = round(score, 2)
+                rows[code] = row
+        except Exception:
+            continue
+    return sorted(rows.values(), key=lambda item: item.get("score", 0), reverse=True)[:20]
+
+
 def fetch_eastmoney_news() -> list[dict[str, Any]]:
-    url = "https://np-listapi.eastmoney.com/comm/web/getNewsByColumns?client=web&biz=web_news_col&column=351&order=1&needInteractData=0&page_index=1&page_size=12&req_trace=1"
+    url = (
+        "https://np-listapi.eastmoney.com/comm/web/getNewsByColumns?"
+        "client=web&biz=web_news_col&column=351&order=1&needInteractData=0"
+        "&page_index=1&page_size=12&req_trace=1"
+    )
     try:
         data = fetch_json(url, timeout=12)
         return data.get("data", {}).get("list") or []
@@ -123,46 +170,25 @@ def limit_pct(code: str, name: str) -> float:
     return 10.0
 
 
-def normalize_board(row: dict[str, Any]) -> dict[str, Any]:
-    return {"code": row.get("f12"), "name": row.get("f14"), "price": row.get("f2"), "pct": row.get("f3"), "turnover": row.get("f8"), "amount": row.get("f20"), "main_net_inflow": row.get("f62")}
-
-
-def normalize_stock(row: dict[str, Any], zt_codes: set[str]) -> dict[str, Any]:
-    code = str(row.get("f12") or "")
-    name = str(row.get("f14") or "")
-    pct = as_float(row.get("f3"))
-    near_limit = code in zt_codes or pct >= limit_pct(code, name) - 0.25
-    return {"code": code, "name": name, "price": row.get("f2"), "pct": row.get("f3"), "amount": row.get("f6"), "turnover": row.get("f8"), "main_net_inflow": row.get("f62"), "main_net_inflow_pct": row.get("f184"), "score": row.get("score"), "near_or_at_limit_up": near_limit}
-
-
-def fetch_hot_stocks(zt_codes: set[str]) -> list[dict[str, Any]]:
-    fields = "f12,f14,f2,f3,f5,f6,f8,f10,f20,f62,f184"
-    fs = "m:0+t:6,m:0+t:80,m:1+t:2,m:1+t:23"
-    rows: dict[str, dict[str, Any]] = {}
-    for fid, pz in (("f62", 180), ("f3", 180), ("f6", 140)):
-        try:
-            for row in eastmoney_clist(fs, fields, fid, pz=pz):
-                code = str(row.get("f12") or "")
-                name = str(row.get("f14") or "")
-                pct = as_float(row.get("f3"))
-                amount = as_float(row.get("f6"))
-                net_inflow = as_float(row.get("f62"))
-                if not code or not name or "ST" in name.upper():
-                    continue
-                if amount < 120_000_000 or net_inflow <= 0 or pct < 0.5:
-                    continue
-                row["score"] = round(pct * 1.8 + min(amount / 100_000_000, 120) * 0.08 + max(net_inflow / 100_000_000, 0) * 1.6 + max(as_float(row.get("f184")), 0) * 0.5, 2)
-                rows[code] = row
-        except Exception:
-            continue
-    sorted_rows = sorted(rows.values(), key=lambda item: item.get("score", 0), reverse=True)[:25]
-    return [normalize_stock(row, zt_codes) for row in sorted_rows]
-
-
 def fetch_global_markets() -> list[MarketItem]:
     import yfinance as yf
 
-    tickers = {"^DJI": "Dow Jones", "^GSPC": "S&P 500", "^IXIC": "Nasdaq", "^HSI": "Hang Seng", "000001.SS": "Shanghai Composite", "399001.SZ": "Shenzhen Component", "CNH=X": "USD/CNH", "DX-Y.NYB": "Dollar Index", "^TNX": "US 10Y Yield", "CL=F": "WTI Crude", "GC=F": "Gold"}
+    tickers = {
+        "^DJI": "Dow Jones",
+        "^GSPC": "S&P 500",
+        "^IXIC": "Nasdaq",
+        "^FTSE": "FTSE 100",
+        "^GDAXI": "DAX",
+        "^N225": "Nikkei 225",
+        "^HSI": "Hang Seng",
+        "000001.SS": "Shanghai Composite",
+        "399001.SZ": "Shenzhen Component",
+        "CNH=X": "USD/CNH",
+        "DX-Y.NYB": "Dollar Index",
+        "^TNX": "US 10Y Yield",
+        "CL=F": "WTI Crude",
+        "GC=F": "Gold",
+    }
     output: list[MarketItem] = []
     end = datetime.now(TZ)
     start = end - timedelta(days=7)
@@ -181,6 +207,48 @@ def fetch_global_markets() -> list[MarketItem]:
     return output
 
 
+def is_allowed_run_time(now: datetime) -> bool:
+    if now.weekday() >= 5:
+        return False
+    minutes = now.hour * 60 + now.minute
+    morning_start = 9 * 60 + 20
+    morning_end = 11 * 60 + 30
+    afternoon_start = 13 * 60
+    afternoon_end = 15 * 60
+    return morning_start <= minutes <= morning_end or afternoon_start <= minutes <= afternoon_end
+
+
+def normalize_board(row: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "code": row.get("f12"),
+        "name": row.get("f14"),
+        "price": row.get("f2"),
+        "pct": row.get("f3"),
+        "turnover": row.get("f8"),
+        "amount": row.get("f20"),
+        "main_net_inflow": row.get("f62"),
+    }
+
+
+def normalize_stock(row: dict[str, Any], zt_codes: set[str]) -> dict[str, Any]:
+    code = str(row.get("f12") or "")
+    name = str(row.get("f14") or "")
+    pct = as_float(row.get("f3"))
+    near_limit = code in zt_codes or pct >= limit_pct(code, name) - 0.25
+    return {
+        "code": code,
+        "name": name,
+        "price": row.get("f2"),
+        "pct": row.get("f3"),
+        "amount": row.get("f6"),
+        "turnover": row.get("f8"),
+        "main_net_inflow": row.get("f62"),
+        "main_net_inflow_pct": row.get("f184"),
+        "score": row.get("score"),
+        "near_or_at_limit_up": near_limit,
+    }
+
+
 def compact_source_data() -> dict[str, Any]:
     now = datetime.now(TZ)
     zt_codes = fetch_limit_up_codes()
@@ -190,12 +258,24 @@ def compact_source_data() -> dict[str, Any]:
         "report_date": now.strftime("%Y-%m-%d"),
         "weekday": now.strftime("%A"),
         "global_markets": [item.__dict__ for item in fetch_global_markets()],
-        "eastmoney_news": [{"title": item.get("title"), "source": item.get("mediaName"), "time": item.get("showTime"), "url": item.get("url") or item.get("shareUrl") or item.get("infoCode")} for item in fetch_eastmoney_news()],
+        "eastmoney_news": [
+            {
+                "title": item.get("title"),
+                "source": item.get("mediaName"),
+                "time": item.get("showTime"),
+                "url": item.get("url") or item.get("shareUrl") or item.get("infoCode"),
+            }
+            for item in fetch_eastmoney_news()
+        ],
         "hot_concepts": [normalize_board(row) for row in boards.get("concepts", [])[:10]],
         "hot_industries": [normalize_board(row) for row in boards.get("industries", [])[:10]],
-        "hot_stocks": fetch_hot_stocks(zt_codes),
+        "hot_stocks": [normalize_stock(row, zt_codes) for row in fetch_hot_stocks()],
         "limit_up_codes_sample": sorted(zt_codes)[:80],
-        "data_notes": ["GitHub Actions is scheduled for weekdays during A-share trading windows in Asia/Shanghai time.", "China holiday and exchange-closure handling is best-effort; cite exchange notices if news indicates a closure.", "Market data comes from public endpoints and may be delayed or incomplete."],
+        "data_notes": [
+            "GitHub Actions is scheduled for weekdays during A-share trading windows in Asia/Shanghai time.",
+            "China holiday and exchange-closure handling is best-effort; cite exchange notices if news indicates a closure.",
+            "Market data comes from public endpoints and may be delayed or incomplete.",
+        ],
     }
 
 
@@ -220,7 +300,12 @@ def call_openai_report(source_data: dict[str, Any]) -> str:
 {json.dumps(source_data, ensure_ascii=False, indent=2)}
 """
     payload = {"model": model, "input": prompt, "temperature": 0.3, "max_output_tokens": 5000}
-    resp = requests.post("https://api.openai.com/v1/responses", headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}, json=payload, timeout=90)
+    resp = requests.post(
+        "https://api.openai.com/v1/responses",
+        headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+        json=payload,
+        timeout=90,
+    )
     resp.raise_for_status()
     data = resp.json()
     text = data.get("output_text")
@@ -240,7 +325,10 @@ def google_credentials():
     from google.oauth2 import service_account
 
     raw = require_env("GOOGLE_SERVICE_ACCOUNT_JSON").strip()
-    info = json.loads(raw) if raw.startswith("{") else json.loads(base64.b64decode(raw).decode("utf-8"))
+    if raw.startswith("{"):
+        info = json.loads(raw)
+    else:
+        info = json.loads(base64.b64decode(raw).decode("utf-8"))
     scopes = ["https://www.googleapis.com/auth/documents", "https://www.googleapis.com/auth/drive.file"]
     return service_account.Credentials.from_service_account_info(info, scopes=scopes)
 
@@ -250,11 +338,24 @@ def drive_query_literal(value: str) -> str:
 
 
 def find_daily_doc(drive, title: str) -> dict[str, str] | None:
-    query_parts = ["mimeType='application/vnd.google-apps.document'", "trashed=false", f"name='{drive_query_literal(title)}'"]
+    query_parts = [
+        "mimeType='application/vnd.google-apps.document'",
+        "trashed=false",
+        f"name='{drive_query_literal(title)}'",
+    ]
     folder_id = os.environ.get("GOOGLE_DRIVE_FOLDER_ID", "").strip()
     if folder_id:
         query_parts.append(f"'{drive_query_literal(folder_id)}' in parents")
-    result = drive.files().list(q=" and ".join(query_parts), fields="files(id,name,webViewLink,modifiedTime)", orderBy="modifiedTime desc", pageSize=1).execute()
+    result = (
+        drive.files()
+        .list(
+            q=" and ".join(query_parts),
+            fields="files(id,name,webViewLink,modifiedTime)",
+            orderBy="modifiedTime desc",
+            pageSize=1,
+        )
+        .execute()
+    )
     files = result.get("files") or []
     return files[0] if files else None
 
@@ -269,12 +370,17 @@ def append_to_daily_google_doc(title: str, body: str, now: datetime) -> str:
     creds = google_credentials()
     drive = build("drive", "v3", credentials=creds, cache_discovery=False)
     docs = build("docs", "v1", credentials=creds, cache_discovery=False)
+
     existing = find_daily_doc(drive, title)
     if existing:
         document_id = existing["id"]
         doc = docs.documents().get(documentId=document_id).execute()
         end_index = doc["body"]["content"][-1]["endIndex"] - 1
-        docs.documents().batchUpdate(documentId=document_id, body={"requests": [{"insertText": {"location": {"index": end_index}, "text": daily_doc_header(now) + body}}]}).execute()
+        insert_text = daily_doc_header(now) + body
+        docs.documents().batchUpdate(
+            documentId=document_id,
+            body={"requests": [{"insertText": {"location": {"index": end_index}, "text": insert_text}}]},
+        ).execute()
         return existing.get("webViewLink") or f"https://docs.google.com/document/d/{document_id}/edit"
 
     file_body: dict[str, Any] = {"name": title, "mimeType": "application/vnd.google-apps.document"}
@@ -283,9 +389,46 @@ def append_to_daily_google_doc(title: str, body: str, now: datetime) -> str:
         file_body["parents"] = [folder_id]
     created = drive.files().create(body=file_body, fields="id,webViewLink").execute()
     document_id = created["id"]
-    first_text = f"# {title}\n" + daily_doc_header(now).lstrip() + body
-    docs.documents().batchUpdate(documentId=document_id, body={"requests": [{"insertText": {"location": {"index": 1}, "text": first_text}}]}).execute()
+    insert_text = f"# {title}\n" + daily_doc_header(now).lstrip() + body
+    docs.documents().batchUpdate(
+        documentId=document_id,
+        body={"requests": [{"insertText": {"location": {"index": 1}, "text": insert_text}}]},
+    ).execute()
     return created.get("webViewLink") or f"https://docs.google.com/document/d/{document_id}/edit"
+
+
+def send_email_report(title: str, body: str, doc_url: str, now: datetime) -> bool:
+    host = optional_env("SMTP_HOST")
+    username = optional_env("SMTP_USERNAME")
+    password = optional_env("SMTP_PASSWORD")
+    recipient = optional_env("EMAIL_TO", "11283176@qq.com")
+    if not (host and username and password and recipient):
+        print("Email skipped: SMTP_HOST, SMTP_USERNAME, SMTP_PASSWORD, or EMAIL_TO is not configured.")
+        return False
+
+    port = int(optional_env("SMTP_PORT", "465"))
+    sender = optional_env("EMAIL_FROM", username)
+    subject = f"{title}｜{now.strftime('%H:%M')}"
+    message = EmailMessage()
+    message["Subject"] = subject
+    message["From"] = sender
+    message["To"] = recipient
+    message.set_content(textwrap.dedent(f"""
+        Google Doc: {doc_url}
+
+        {body}
+        """).strip() + "\n")
+
+    if port == 465:
+        with smtplib.SMTP_SSL(host, port, timeout=30) as smtp:
+            smtp.login(username, password)
+            smtp.send_message(message)
+    else:
+        with smtplib.SMTP(host, port, timeout=30) as smtp:
+            smtp.starttls()
+            smtp.login(username, password)
+            smtp.send_message(message)
+    return True
 
 
 def save_local_copy(title: str, report: str) -> Path:
@@ -308,6 +451,7 @@ def main() -> int:
         report = call_openai_report(source_data)
         local_path = save_local_copy(f"{title}_{now.strftime('%H%M')}", report)
         doc_url = append_to_daily_google_doc(title, report, now)
+        email_sent = send_email_report(title, report, doc_url, now)
     except Exception as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 1
@@ -316,6 +460,7 @@ def main() -> int:
         Saved report: {title}
         Local copy: {local_path}
         Google Doc: {doc_url}
+        Email sent: {email_sent}
         """).strip())
     return 0
 
