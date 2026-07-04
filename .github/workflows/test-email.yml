@@ -1,5 +1,5 @@
-name: Test QQ mail delivery
-# trigger: 2026-07-04T10:12:00+08:00
+name: Test Gmail mail delivery
+# trigger: 2026-07-04T10:20:00+08:00
 
 on:
   push:
@@ -16,11 +16,11 @@ jobs:
     steps:
       - name: Send test email
         env:
-          SMTP_HOST: smtp.qq.com
+          SMTP_HOST: smtp.gmail.com
           SMTP_PORT: "465"
-          SMTP_USERNAME: 11283176@qq.com
+          SMTP_USERNAME: zhangdaojun@gmail.com
           SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
-          EMAIL_FROM: 11283176@qq.com
+          EMAIL_FROM: zhangdaojun@gmail.com
           EMAIL_TO: 11283176@qq.com
         run: |
           python - <<'PY'
@@ -45,7 +45,7 @@ jobs:
               f"发送账号：{os.environ['EMAIL_FROM']}\n"
               f"接收账号：{os.environ['EMAIL_TO']}\n"
               f"北京时间：{now}\n\n"
-              "如果收到这封邮件，说明 QQ 邮箱 SMTP 授权码和发送链路配置正常。\n"
+              "如果收到这封邮件，说明 Gmail SMTP 应用专用密码和发送链路配置正常。\n"
           )
 
           with smtplib.SMTP_SSL(os.environ["SMTP_HOST"], int(os.environ["SMTP_PORT"]), timeout=30) as smtp:
